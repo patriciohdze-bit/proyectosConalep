@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
+  <title>Nacimiento AR - Coloca en el piso</title>
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
+
+  <!-- aframe extras (optional utilities) -->
+  <script src="https://cdn.jsdelivr.net/npm/aframe-extras@6.1.1/dist/aframe-extras.min.js"></script>
+
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; }
+    #msg {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: 18px;
+      background: rgba(0,0,0,0.6);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 14px;
+      z-index: 999;
+    }
+    #overlay {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(255,255,255,0.85);
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 999;
+    }
+  </style>
+</head>
+<body>
+
+<div id="overlay">Apunta al suelo. Toca en la pantalla para colocar el nacimiento.</div>
+<div id="msg">Esperando detección del entorno...</div>
+
+<a-scene
+  embedded
+  vr-mode-ui="enabled: false"
+  renderer="logarithmicDepthBuffer: true; sortObjects: true;"
+  webxr="optionalFeatures: local-floor,bounded-floor,hit-test"
+  arjs="sourceType: webcam; debugUIEnabled: false;"
+  loading-screen="enabled: false"
+>
+  <!-- Contenedor donde estará el modelo. Inicialmente invisible. -->
+  <a-entity id="placed" visible="false" position="0 0 0">
+    <!-- Rotación animada suave -->
+    <a-entity id="rotator" rotation="0 0 0" animation="property: rotation; to: 0 360 0; loop: true; dur: 10000; easing: linear">
+      <!-- Modelo OBJ -->
+      <a-obj-model id="natalModel" src="models/natal.obj" position="0 0 0" scale="1 1 1"></a-obj-model>
+    </a-entity>
+  </a-entity>
+
+  <a-hemisphere-light intensity="0.9"></a-hemisphere-light>
+  <a-entity camera></a-entity>
+</a-scene>
+
+<script>
+(async function () {
+  const msg = document.getElementById('msg');
+  const placed = document.getElementById('placed');
+  const natalModel = document.getElementById('natalModel');
+
+  // Ajuste de escala "real aproximada" (ajusta si es necesario)
+  natalModel.setAttribute('scale', '1 1 1');
+
+  // Helper para mostrar mensajes
+  function show(text, timeout) {
+    msg.textContent = text;
+    if (timeout) setTimeout(() => { msg.textContent = ''; }, timeout);
+  }
+
+  // Esperar a que la escena A-Frame esté lista
+  const scene = document.querySelector('a-scene');
+  await scene.hasLoaded;
+
+  // Intentar usar WebXR Hit Test (mejor precisión en planos reales)
+  const renderer = scene.renderer;
+  if (navigator.xr && renderer && renderer.xr) {
+    try {
+      // Request an immersive-ar session when user interacts (required by some browsers).
+      show('Toca la pantalla para iniciar sesión AR y colocar el nacimiento.');
+
+      // On first touch, request session and set up hit test
+      const startAR = async () => {
+        try {
+          const session = await navigator.xr.requestSession('immersive-ar', {
+            requiredFeatures: ['hit-test', 'local-floor']
+          });
+          renderer.xr.setSession(session);
+          const referenceSpace = await session.requestReferenceSpace('local-floor');
+          const viewerSpace = await session.requestReferenceSpace('viewer');
+
+          const hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+
+          show('Mueve la cámara hasta que el sistema detecte una superficie. Luego toca para colocar.', 4000);
+
+          // On touch -> perform a hit test at the tap screen center
+          const placeOnTap = (ev) => {
+            // get normalized screen coordinates from touch
+            const touch = (ev.touches && ev.touches[0]) || ev;
+            const x = touch.clientX / window.innerWidth * 2 - 1;
+            const y = -(touch.clientY / window.innerHeight) * 2 + 1;
+
+            // Use current XRFrame to do hit test: need to wait for XRFrame; we'll rely on requestAnimationFrame loop
+            // Set a one-time flag to place on next XR frame with the normalized coords
+            pendingPlace = { xNorm: x, yNorm: y };
+          };
+
+          let pendingPlace = null;
+
+          session.addEventListener('select', (e) => {
+            // some devices emit 'select' on screen tap
+            pendingPlace = { xNorm: 0, yNorm: 0 }; // center fallback
+          });
+
+          window.addEventListener('touchstart', placeOnTap, { once: false, passive: true });
+
+          // Animation loop to check hit test results
+          session.requestAnimationFrame(function onXRFrame(time, xrFrame) {
+            const pose = xrFrame.getViewerPose(referenceSpace);
+            if (pose) {
+              const hitTestResults = xrFrame.getHitTestResults(hitTestSource);
+              if (hitTestResults.length > 0) {
+                // Show hint that plane is detected
+                show('Superficie detectada. Toca la pantalla donde quieras colocar el nacimiento.', 2000);
+              }
+              if (pendingPlace && hitTestResults.length > 0) {
+                const hit = hitTestResults[0];
+                const hitPose = hit.getPose(referenceSpace);
+                if (hitPose) {
+                  const pos = hitPose.transform.position;
+                  const rot = hitPose.transform.orientation;
+                  // Set position and make visible
+                  placed.setAttribute('position', `${pos.x} ${pos.y} ${pos.z}`);
+                  placed.setAttribute('visible', 'true');
+                  // adjust rotation if needed (apply Y rotation only)
+                  // stop listening for touches to place
+                  window.removeEventListener('touchstart', placeOnTap);
+                  show('Nacimiento colocado. ¡Disfruta!', 3000);
+                }
+                pendingPlace = null;
+              }
+            }
+            session.requestAnimationFrame(onXRFrame);
+          });
+
+          // Remove this start listener to prevent re-requesting session
+          window.removeEventListener('touchstart', startAR);
+        } catch (err) {
+          console.warn('WebXR hit-test failed or not supported:', err);
+          show('WebXR no disponible. Usando método alternativo (fallback).', 3000);
+          enableFallbackPlacement();
+          window.removeEventListener('touchstart', startAR);
+        }
+      };
+
+      // Wait for first user tap to start AR session (required by some browsers)
+      window.addEventListener('touchstart', startAR, { once: true, passive: true });
+    } catch (err) {
+      console.warn('Error setting up WebXR:', err);
+      show('WebXR no disponible en este dispositivo. Usando fallback.', 3000);
+      enableFallbackPlacement();
+    }
+  } else {
+    // No WebXR support: use fallback raycast onto a horizontal virtual plane at y=0
+    show('WebXR no disponible. Usando método alternativo (fallback).', 3000);
+    enableFallbackPlacement();
+  }
+
+  // Fallback placement using A-Frame raycaster onto a virtual ground plane
+  function enableFallbackPlacement() {
+    show('Toca el suelo en la pantalla para colocar el nacimiento (fallback).');
+
+    // Create an invisible A-Frame plane at y=0 to intersect with raycaster
+    let ground = document.getElementById('__fallback_ground');
+    if (!ground) {
+      ground = document.createElement('a-entity');
+      ground.setAttribute('id', '__fallback_ground');
+      // big plane to catch raycasts
+      ground.setAttribute('geometry', { primitive: 'plane', width: 100, height: 100 });
+      ground.setAttribute('rotation', '-90 0 0');
+      ground.setAttribute('position', '0 0 0');
+      ground.setAttribute('material', 'visible: false;');
+      document.querySelector('a-scene').appendChild(ground);
+    }
+
+    // On touch, perform raycast from camera into scene and intersect with ground
+    window.addEventListener('touchstart', function handler(ev) {
+      const touch = ev.touches[0];
+      const cam = document.querySelector('[camera]').object3D;
+      const sceneEl = document.querySelector('a-scene');
+      const threeCam = sceneEl.camera;
+      if (!threeCam) return;
+
+      // compute normalized device coordinates
+      const nx = (touch.clientX / window.innerWidth) * 2 - 1;
+      const ny = -(touch.clientY / window.innerHeight) * 2 + 1;
+
+      const pointer = new THREE.Vector2(nx, ny);
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(pointer, threeCam);
+
+      // build three.js mesh for the ground (in scene)
+      const groundMesh = document.querySelector('#__fallback_ground').getObject3D('mesh');
+      if (!groundMesh) {
+        show('Todavía no listo. Intenta mover la cámara y tocar de nuevo.', 1500);
+        return;
+      }
+
+      const intersects = raycaster.intersectObject(groundMesh, true);
+      if (intersects.length > 0) {
+        const p = intersects[0].point;
+        placed.setAttribute('position', `${p.x} ${p.y} ${p.z}`);
+        placed.setAttribute('visible', 'true');
+        show('Nacimiento colocado (fallback). ¡Listo!', 2500);
+        window.removeEventListener('touchstart', handler);
+      } else {
+        show('No se detectó el suelo en ese toque. Mueve la cámara y prueba otra vez.', 2000);
+      }
+    }, { passive: true });
+  }
+
+})();
+</script>
+
+</body>
+</html>
